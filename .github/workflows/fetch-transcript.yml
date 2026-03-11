@@ -11,7 +11,7 @@ on:
 jobs:
   fetch-transcript:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Install yt-dlp
         run: |
@@ -19,30 +19,39 @@ jobs:
 
       - name: Extract video ID
         id: extract
+        shell: bash
         run: |
           INPUT="${{ github.event.inputs.video_url }}"
-          # Handle full URLs or just video IDs
-          if [[ "$INPUT" == *"youtube.com"* ]] || [[ "$INPUT" == *"youtu.be"* ]]; then
-            # Extract ID from URL
-            VIDEO_ID=$(echo "$INPUT" | sed -E 's/.*[?&]v=([^&]+).*/\1/' | sed -E 's/.*youtu\.be\/([^?]+).*/\1/')
-          else
+          if [[ "$INPUT" =~ ^[A-Za-z0-9_-]{11}$ ]]; then
             VIDEO_ID="$INPUT"
+          elif [[ "$INPUT" == *"youtu.be/"* ]]; then
+            VIDEO_ID=$(echo "$INPUT" | sed -E 's#.*youtu\.be/([^?&/]+).*#\1#')
+          elif [[ "$INPUT" == *"/live/"* ]]; then
+            VIDEO_ID=$(echo "$INPUT" | sed -E 's#.*youtube\.com/live/([^?&/]+).*#\1#')
+          else
+            VIDEO_ID=$(echo "$INPUT" | sed -nE 's#.*[?&]v=([^&]+).*#\1#p')
           fi
+
+          if [[ -z "$VIDEO_ID" ]]; then
+            echo "Could not parse video id from input: $INPUT"
+            exit 1
+          fi
+
+          SAFE_NAME=$(echo "$VIDEO_ID" | tr -cd 'A-Za-z0-9._-')
           echo "video_id=$VIDEO_ID" >> $GITHUB_OUTPUT
+          echo "artifact_name=transcript-$SAFE_NAME" >> $GITHUB_OUTPUT
           echo "Extracted video ID: $VIDEO_ID"
 
       - name: Fetch transcript
         id: transcript
+        shell: bash
         run: |
           VIDEO_ID="${{ steps.extract.outputs.video_id }}"
           echo "Fetching transcript for: $VIDEO_ID"
-          
-          # Try to get English transcript, fall back to auto-generated
+
           yt-dlp --write-subs --write-auto-subs --sub-lang en --skip-download --sub-format vtt -o "transcript" "https://www.youtube.com/watch?v=$VIDEO_ID" || true
-          
-          # Convert VTT to plain text
+
           if [ -f transcript.en.vtt ]; then
-            # Remove VTT formatting, timestamps, and duplicates
             grep -v "^WEBVTT" transcript.en.vtt | \
             grep -v "^Kind:" | \
             grep -v "^Language:" | \
@@ -70,7 +79,7 @@ jobs:
       - name: Upload transcript as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: transcript-${{ steps.extract.outputs.video_id }}
+          name: ${{ steps.extract.outputs.artifact_name }}
           path: transcript.txt
           retention-days: 7
 
