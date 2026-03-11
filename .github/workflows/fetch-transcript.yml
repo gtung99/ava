@@ -11,82 +11,126 @@ on:
 jobs:
   fetch-transcript:
     runs-on: ubuntu-latest
-
+    
     steps:
-      - name: Install yt-dlp
-        run: |
-          pip install yt-dlp
-
       - name: Extract video ID
         id: extract
-        shell: bash
         run: |
           INPUT="${{ github.event.inputs.video_url }}"
-          if [[ "$INPUT" =~ ^[A-Za-z0-9_-]{11}$ ]]; then
-            VIDEO_ID="$INPUT"
+          # Handle all URL formats
+          if [[ "$INPUT" == *"youtube.com/watch"* ]]; then
+            VIDEO_ID=$(echo "$INPUT" | sed -E 's/.*[?&]v=([^&]+).*/\1/')
+          elif [[ "$INPUT" == *"youtube.com/live/"* ]]; then
+            VIDEO_ID=$(echo "$INPUT" | sed -E 's/.*\/live\/([^?]+).*/\1/')
           elif [[ "$INPUT" == *"youtu.be/"* ]]; then
-            VIDEO_ID=$(echo "$INPUT" | sed -E 's#.*youtu\.be/([^?&/]+).*#\1#')
-          elif [[ "$INPUT" == *"/live/"* ]]; then
-            VIDEO_ID=$(echo "$INPUT" | sed -E 's#.*youtube\.com/live/([^?&/]+).*#\1#')
+            VIDEO_ID=$(echo "$INPUT" | sed -E 's/.*youtu\.be\/([^?]+).*/\1/')
           else
-            VIDEO_ID=$(echo "$INPUT" | sed -nE 's#.*[?&]v=([^&]+).*#\1#p')
+            VIDEO_ID="$INPUT"
           fi
-
-          if [[ -z "$VIDEO_ID" ]]; then
-            echo "Could not parse video id from input: $INPUT"
-            exit 1
-          fi
-
-          SAFE_NAME=$(echo "$VIDEO_ID" | tr -cd 'A-Za-z0-9._-')
           echo "video_id=$VIDEO_ID" >> $GITHUB_OUTPUT
-          echo "artifact_name=transcript-$SAFE_NAME" >> $GITHUB_OUTPUT
           echo "Extracted video ID: $VIDEO_ID"
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install youtube-transcript-api
+
       - name: Fetch transcript
-        id: transcript
-        shell: bash
         run: |
           VIDEO_ID="${{ steps.extract.outputs.video_id }}"
           echo "Fetching transcript for: $VIDEO_ID"
-
-          yt-dlp --verbose --write-auto-sub --sub-lang en --skip-download --sub-format vtt -o "transcript" "https://www.youtube.com/watch?v=$VIDEO_ID" || true
-
-          if [ -f transcript.en.vtt ]; then
-            grep -v "^WEBVTT" transcript.en.vtt | \
-            grep -v "^Kind:" | \
-            grep -v "^Language:" | \
-            grep -v "^[0-9][0-9]:[0-9][0-9]" | \
-            grep -v "^\s*$" | \
-            grep -v "^NOTE" | \
-            sed 's/<[^>]*>//g' | \
-            awk '!seen[$0]++' > transcript.txt
-            echo "Transcript saved to transcript.txt"
-          elif [ -f transcript.en-US.vtt ]; then
-            grep -v "^WEBVTT" transcript.en-US.vtt | \
-            grep -v "^Kind:" | \
-            grep -v "^Language:" | \
-            grep -v "^[0-9][0-9]:[0-9][0-9]" | \
-            grep -v "^\s*$" | \
-            grep -v "^NOTE" | \
-            sed 's/<[^>]*>//g' | \
-            awk '!seen[$0]++' > transcript.txt
-            echo "Transcript saved to transcript.txt"
-          else
-            echo "No transcript found for video $VIDEO_ID" > transcript.txt
-            echo "::warning::No transcript available for this video"
-          fi
+          
+          python3 << 'EOF'
+          import sys
+          
+          video_id = "${{ steps.extract.outputs.video_id }}"
+          
+          try:
+              from youtube_transcript_api import YouTubeTranscriptApi
+              from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
+              
+              try:
+                  # Try to get transcript list
+                  transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                  
+                  # Try manual English first, then auto-generated, then translate
+                  transcript = None
+                  
+                  # Method 1: Manual English
+                  try:
+                      transcript = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
+                      print("Found manual English transcript")
+                  except:
+                      pass
+                  
+                  # Method 2: Auto-generated English
+                  if not transcript:
+                      try:
+                          transcript = transcript_list.find_generated_transcript(['en', 'en-US', 'en-GB'])
+                          print("Found auto-generated English transcript")
+                      except:
+                          pass
+                  
+                  # Method 3: Any transcript, translate to English
+                  if not transcript:
+                      for t in transcript_list:
+                          try:
+                              transcript = t.translate('en')
+                              print(f"Translated {t.language_code} transcript to English")
+                              break
+                          except:
+                              continue
+                  
+                  if transcript:
+                      transcript_data = transcript.fetch()
+                      
+                      # Combine into plain text
+                      full_text = ' '.join([entry['text'] for entry in transcript_data])
+                      
+                      # Clean up whitespace
+                      full_text = full_text.replace('\n', ' ')
+                      full_text = ' '.join(full_text.split())
+                      
+                      with open('transcript.txt', 'w', encoding='utf-8') as f:
+                          f.write(full_text)
+                      
+                      print(f"SUCCESS: Transcript saved - {len(full_text)} characters")
+                      sys.exit(0)
+                  else:
+                      raise NoTranscriptFound(video_id, [], None)
+                      
+              except TranscriptsDisabled:
+                  print("FAILED: Transcripts are disabled for this video")
+                  with open('transcript.txt', 'w') as f:
+                      f.write(f"Transcripts are disabled for video {video_id}")
+                      
+              except NoTranscriptFound:
+                  print("FAILED: No transcript available for this video")
+                  with open('transcript.txt', 'w') as f:
+                      f.write(f"No transcript found for video {video_id}")
+                      
+          except Exception as e:
+              print(f"ERROR: {e}")
+              with open('transcript.txt', 'w') as f:
+                  f.write(f"Error fetching transcript for video {video_id}: {e}")
+          
+          EOF
 
       - name: Upload transcript as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.extract.outputs.artifact_name }}
+          name: transcript-${{ steps.extract.outputs.video_id }}
           path: transcript.txt
           retention-days: 7
 
-      - name: Output transcript preview
+      - name: Output transcript
         run: |
-          echo "=== TRANSCRIPT PREVIEW (first 100 lines) ==="
-          head -100 transcript.txt
+          echo "=== TRANSCRIPT OUTPUT ==="
+          cat transcript.txt
           echo ""
-          echo "=== FULL TRANSCRIPT LENGTH ==="
-          wc -l transcript.txt
+          echo "=== LENGTH ==="
+          wc -c transcript.txt
