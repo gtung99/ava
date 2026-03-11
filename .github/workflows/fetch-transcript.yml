@@ -49,7 +49,7 @@ jobs:
           VIDEO_ID="${{ steps.extract.outputs.video_id }}"
           echo "Fetching transcript for: $VIDEO_ID"
 
-          yt-dlp --write-subs --write-auto-subs --sub-lang en --skip-download --sub-format vtt -o "transcript" "https://www.youtube.com/watch?v=$VIDEO_ID" || true
+          yt-dlp --verbose --write-auto-sub --sub-lang en --skip-download --sub-format vtt -o "transcript" "https://www.youtube.com/watch?v=$VIDEO_ID" || true
 
           if [ -f transcript.en.vtt ]; then
             grep -v "^WEBVTT" transcript.en.vtt | \
